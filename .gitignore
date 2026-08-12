@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Environment
+.env
+
+# Data & uploads
+data/
+*.db
+
+# Model caches
+.cache/
+models/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
