@@ -1,0 +1,51 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: educator
+      POSTGRES_PASSWORD: educator
+      POSTGRES_DB: educator
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U educator"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    # On macOS, Docker has no GPU/Metal access. For faster answers, run
+    # Ollama natively (`brew install ollama`) and point the api service at
+    # OLLAMA_BASE_URL=http://host.docker.internal:11434 instead.
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://educator:educator@db:5432/educator
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      UPLOAD_DIR: /data/uploads
+      HF_HOME: /data/hf-cache
+    volumes:
+      - appdata:/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  ollama:
+  appdata:

@@ -1,0 +1,30 @@
+# API
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+pydantic-settings>=2.4
+
+# Database (PostgreSQL + pgvector)
+sqlalchemy>=2.0
+psycopg[binary]>=3.2
+pgvector>=0.3
+
+# Document parsing
+pymupdf>=1.24
+pandas>=2.2
+python-docx>=1.1
+
+# OCR for scanned PDFs (requires the tesseract binary + eng/hin language packs)
+pytesseract>=0.3.10
+pillow>=10.0
+
+# Embeddings (local, multilingual)
+sentence-transformers>=3.0
+
+# LLM providers
+httpx>=0.27            # Ollama client
+anthropic>=0.40        # Claude provider (future switch)
+
+# CLI
+typer>=0.12
+rich>=13.0
