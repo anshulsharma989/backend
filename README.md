@@ -64,12 +64,12 @@ This is a **RAG (Retrieval-Augmented Generation)** application. Instead of fine-
   - "I don't know" behavior — if the answer isn't in the books, the app says so instead of hallucinating
 - **Auth & roles** — Admin, Student (each student has a grade; Teacher role reserved for later)
 
-### Phase 2 (Enhancements)
-- Streaming answers (token-by-token, like ChatGPT)
-- Follow-up questions with conversation memory
-- Feedback (👍/👎) on answers to measure quality
-- Quiz generation from chapters ("test me on Chapter 4")
-- Analytics dashboard for admins (most-asked questions, weak topics per grade)
+### Phase 2 (Enhancements) — implemented ✅ (backend + CLI; UI in M3)
+- ✅ Streaming answers (token-by-token over SSE: `POST /chat/ask/stream`)
+- ✅ Follow-up questions with conversation memory (follow-ups are condensed into standalone search queries; history included in the prompt)
+- ✅ Feedback (👍/👎ratings + comments on answers)
+- ✅ Quiz generation from the books ("test me": `POST /quiz`, `python -m app.cli quiz`)
+- ✅ Basic admin analytics (`GET /admin/analytics`: question count, feedback tallies, recent questions)
 
 ### Phase 3 (Scale, Mobile & Voice)
 - **Mobile apps (Android/iOS)** — the backend is a clean REST API from day one, so mobile is purely a new frontend. Recommended: **React Native (Expo)** to reuse web React skills and share code.
@@ -223,12 +223,17 @@ POST   /admin/grades             # manage grades & subjects
 POST   /admin/subjects
 
 # Student (all responses scoped to the student's grade automatically)
-POST   /chat/ask                 # {question, subject_id?, document_id?, conversation_id?}
-                                 # → {answer, sources[], conversation_id}
+POST   /chat/ask                 # {question, conversation_id?, grade?, subject?}
+                                 # → {conversation_id, message_id, answer, sources[]}
+POST   /chat/ask/stream          # same body; SSE stream: start → token* → done
 GET    /chat/conversations
 GET    /chat/conversations/{id}/messages
+POST   /chat/messages/{id}/feedback   # {rating: 1 | -1, comment?}
+POST   /quiz                     # {grade?, subject?, document_id?, num_questions?}
+POST   /ask                      # one-shot Q&A without conversation memory
 
 GET    /subjects                 # subjects/books for the student's grade only
+GET    /admin/analytics          # question count, feedback tallies, recent questions
 ```
 
 ---
@@ -346,9 +351,9 @@ CLAUDE_MODEL=claude-opus-5     # configurable
 |---|---|---|
 | **M1 — Walking skeleton** | Docker Compose; FastAPI + Postgres + Ollama wired; ingest a PDF → ask a question (CLI + API), get a grounded answer with citations | ✅ **Done** |
 | **M2 — Ingestion** | Upload API ✅, PDF/CSV/DOCX/TXT parsers ✅, OCR for scanned PDFs ✅, status tracking ✅ — remaining: move background ingestion to Celery + Redis for durability | 🟡 Mostly done |
-| **M3 — Student chat** | React chat UI, conversation history, streaming answers (English + Hindi) | ⬜ |
+| **M3 — Student chat** | React chat UI (streaming, memory, sources, 👍/👎) + Quiz page + Admin page (upload/status/analytics) | ✅ **Done** |
 | **M4 — Auth & grades** | JWT auth, roles, grade-based access control tied to student accounts, admin dashboard for grades/subjects/documents | ⬜ |
-| **M5 — Polish** | Feedback buttons, better chunking/re-ranking, quiz generation | ⬜ |
+| **M5 — Polish** | Feedback ✅, quiz generation ✅, basic analytics ✅ — remaining: re-ranking, better chunking experiments | 🟡 Mostly done |
 | **M6 — Claude option** | Claude provider ✅ (already implemented — flip `LLM_PROVIDER=claude`) | ✅ Done early |
 | **M7 — Mobile & voice** | React Native app on the existing API; Whisper-based voice questions (EN + HI), optional spoken answers | ⬜ |
 

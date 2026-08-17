@@ -98,5 +98,85 @@ def docs() -> None:
     console.print(table)
 
 
+@app.command()
+def chat(
+    grade: str = typer.Option(None, help="Restrict to a grade"),
+    subject: str = typer.Option(None, help="Restrict to a subject"),
+) -> None:
+    """Interactive chat with conversation memory (streamed answers).
+
+    Follow-up questions like "why is that?" are understood in context.
+    Type 'exit' or press Ctrl+C to quit.
+    """
+    from app.db import get_session_factory, init_db
+    from app.services import chat as chat_service
+
+    init_db()
+    db = get_session_factory()()
+    conversation_id: int | None = None
+    console.print("[dim]Chat started — ask away (type 'exit' to quit).[/dim]")
+
+    while True:
+        try:
+            question = console.input("\n[bold cyan]You:[/bold cyan] ").strip()
+        except (KeyboardInterrupt, EOFError):
+            break
+        if not question or question.lower() in ("exit", "quit"):
+            break
+
+        console.print("[bold green]Tutor:[/bold green] ", end="")
+        sources = []
+        for event in chat_service.ask_stream(
+            db, question, conversation_id=conversation_id, grade=grade, subject=subject
+        ):
+            if event["type"] == "start":
+                conversation_id = event["conversation_id"]
+            elif event["type"] == "token":
+                print(event["text"], end="", flush=True)
+            elif event["type"] == "done":
+                sources = event["sources"]
+        print()
+        if sources:
+            refs = ", ".join(
+                f"[{s['index']}] {s['document_title']}"
+                + (f" p.{s['page_number']}" if s["page_number"] else "")
+                for s in sources
+            )
+            console.print(f"[dim]Sources: {refs}[/dim]")
+
+    console.print("[dim]Bye![/dim]")
+
+
+@app.command()
+def quiz(
+    grade: str = typer.Option(None, help="Restrict to a grade"),
+    subject: str = typer.Option(None, help="Restrict to a subject"),
+    num_questions: int = typer.Option(5, help="How many questions"),
+) -> None:
+    """Generate a quiz from the ingested books."""
+    from app.db import get_session_factory, init_db
+    from app.services.quiz import generate_quiz
+
+    init_db()
+    db = get_session_factory()()
+    with console.status("Writing quiz…"):
+        result = generate_quiz(db, grade=grade, subject=subject, num_questions=num_questions)
+
+    if result.get("questions") is None:
+        console.print(f"[red]Quiz failed:[/red] {result.get('error')}")
+        if result.get("raw"):
+            console.print(f"[dim]{result['raw']}[/dim]")
+        raise typer.Exit(1)
+
+    letters = "ABCD"
+    for i, q in enumerate(result["questions"], start=1):
+        console.print(f"\n[bold]Q{i}. {q['question']}[/bold]")
+        for letter, option in zip(letters, q.get("options", [])):
+            console.print(f"   {letter}) {option}")
+        answer_index = q.get("answer_index", 0)
+        answer_letter = letters[answer_index] if 0 <= answer_index < 4 else "?"
+        console.print(f"   [green]Answer: {answer_letter}[/green]  [dim]{q.get('explanation', '')}[/dim]")
+
+
 if __name__ == "__main__":
     app()

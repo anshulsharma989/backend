@@ -1,3 +1,7 @@
+# Pin the Compose project name so volumes stay stable even if this file moves.
+# (Volume names are derived from the project name: educator_pgdata, etc.)
+name: educator
+
 services:
   db:
     image: pgvector/pgvector:pg16

@@ -4,7 +4,9 @@ Auth and grade-scoped student sessions arrive in M4 — until then, /ask
 accepts an optional grade filter directly.
 """
 
+import json
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import (
@@ -16,15 +18,25 @@ from fastapi import (
     HTTPException,
     UploadFile,
 )
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db import get_db, get_session_factory
-from app.models import Document, DocumentStatus
+from app.models import (
+    Conversation,
+    Document,
+    DocumentStatus,
+    Message,
+    MessageRole,
+)
+from app.services import chat as chat_service
 from app.services.ingestion.parsers import supported_extensions
 from app.services.ingestion.pipeline import ingest_document
 from app.services.qa import answer_question
+from app.services.quiz import generate_quiz
 
 router = APIRouter()
 
@@ -164,3 +176,174 @@ def delete_document(document_id: int, db: Session = Depends(get_db)) -> None:
         Path(document.file_path).unlink(missing_ok=True)
     db.delete(document)  # chunks cascade
     db.commit()
+
+
+# --- Chat with memory (Phase 2) ---
+
+
+class ChatRequest(BaseModel):
+    question: str
+    conversation_id: int | None = None  # omit to start a new conversation
+    grade: str | None = None
+    subject: str | None = None
+    document_id: int | None = None
+
+
+class ChatResponse(BaseModel):
+    conversation_id: int
+    message_id: int
+    answer: str
+    sources: list[SourceResponse]
+
+
+class ConversationResponse(BaseModel):
+    id: int
+    title: str | None
+    grade: str | None
+    subject: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class MessageResponse(BaseModel):
+    id: int
+    role: MessageRole
+    content: str
+    sources: list | None
+    rating: int | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class FeedbackRequest(BaseModel):
+    rating: int  # +1 (helpful) or -1 (not helpful)
+    comment: str | None = None
+
+
+@router.post("/chat/ask", response_model=ChatResponse)
+def chat_ask(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
+    try:
+        result = chat_service.ask(
+            db,
+            question=request.question,
+            conversation_id=request.conversation_id,
+            grade=request.grade,
+            subject=request.subject,
+            document_id=request.document_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return ChatResponse(
+        conversation_id=result.conversation_id,
+        message_id=result.message_id,
+        answer=result.answer,
+        sources=[SourceResponse(**vars(s)) for s in result.sources],
+    )
+
+
+@router.post("/chat/ask/stream")
+def chat_ask_stream(request: ChatRequest, db: Session = Depends(get_db)) -> StreamingResponse:
+    """Server-Sent Events: `start` → many `token` events → `done` (with sources)."""
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    def event_stream():
+        try:
+            for event in chat_service.ask_stream(
+                db,
+                question=request.question,
+                conversation_id=request.conversation_id,
+                grade=request.grade,
+                subject=request.subject,
+                document_id=request.document_id,
+            ):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as exc:  # surface errors as an SSE event, not a broken stream
+            yield f"data: {json.dumps({'type': 'error', 'detail': str(exc)})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.get("/chat/conversations", response_model=list[ConversationResponse])
+def list_conversations(db: Session = Depends(get_db)) -> list[Conversation]:
+    return db.query(Conversation).order_by(Conversation.created_at.desc()).all()
+
+
+@router.get("/chat/conversations/{conversation_id}/messages", response_model=list[MessageResponse])
+def list_messages(conversation_id: int, db: Session = Depends(get_db)) -> list[Message]:
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conversation.messages
+
+
+@router.post("/chat/messages/{message_id}/feedback", response_model=MessageResponse)
+def submit_feedback(
+    message_id: int, request: FeedbackRequest, db: Session = Depends(get_db)
+) -> Message:
+    if request.rating not in (1, -1):
+        raise HTTPException(status_code=400, detail="rating must be 1 or -1")
+    message = db.get(Message, message_id)
+    if message is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if message.role != MessageRole.assistant:
+        raise HTTPException(status_code=400, detail="Feedback applies to assistant messages")
+    message.rating = request.rating
+    message.feedback_comment = request.comment
+    db.commit()
+    return message
+
+
+# --- Quiz (Phase 2) ---
+
+
+class QuizRequest(BaseModel):
+    grade: str | None = None
+    subject: str | None = None
+    document_id: int | None = None
+    num_questions: int | None = None
+
+
+@router.post("/quiz")
+def create_quiz(request: QuizRequest, db: Session = Depends(get_db)) -> dict:
+    result = generate_quiz(
+        db,
+        grade=request.grade,
+        subject=request.subject,
+        document_id=request.document_id,
+        num_questions=request.num_questions,
+    )
+    if result.get("questions") is None:
+        raise HTTPException(status_code=422, detail=result)
+    return result
+
+
+# --- Admin analytics (Phase 2, minimal) ---
+
+
+@router.get("/admin/analytics")
+def analytics(db: Session = Depends(get_db)) -> dict:
+    questions = db.scalar(
+        select(func.count()).select_from(Message).where(Message.role == MessageRole.user)
+    )
+    helpful = db.scalar(
+        select(func.count()).select_from(Message).where(Message.rating == 1)
+    )
+    not_helpful = db.scalar(
+        select(func.count()).select_from(Message).where(Message.rating == -1)
+    )
+    recent = db.scalars(
+        select(Message)
+        .where(Message.role == MessageRole.user)
+        .order_by(Message.id.desc())
+        .limit(20)
+    ).all()
+    return {
+        "total_questions": questions,
+        "feedback": {"helpful": helpful, "not_helpful": not_helpful},
+        "recent_questions": [m.content for m in recent],
+    }

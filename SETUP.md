@@ -124,7 +124,18 @@ python -m app.cli ask "What is Newton's first law?" --grade 9
 
 You'll get an answer grounded in the book plus a sources table (book, subject, page). Hindi questions work the same way — the answer comes back in Hindi.
 
-### 3.3 Run the API server
+### 3.3 Interactive chat & quiz (Phase 2)
+
+```bash
+# Chat with memory — follow-ups like "give me an example of it" work.
+# Answers stream token by token. Type 'exit' to quit.
+python -m app.cli chat --grade 9
+
+# Generate a quiz from the ingested books
+python -m app.cli quiz --grade 9 --num-questions 5
+```
+
+### 3.4 Run the API server
 
 ```bash
 uvicorn app.main:app --reload
@@ -147,7 +158,44 @@ curl http://localhost:8000/admin/documents/1
 curl -X POST http://localhost:8000/ask \
      -H "Content-Type: application/json" \
      -d '{"question": "What is Newton'\''s first law?", "grade": "9"}'
+
+# Chat with memory (reuse the returned conversation_id for follow-ups)
+curl -X POST http://localhost:8000/chat/ask \
+     -H "Content-Type: application/json" \
+     -d '{"question": "What is inertia?", "grade": "9"}'
+
+# Streaming chat (SSE events: start → token… → done)
+curl -N -X POST http://localhost:8000/chat/ask/stream \
+     -H "Content-Type: application/json" \
+     -d '{"question": "What is inertia?", "grade": "9"}'
+
+# Rate an answer (message_id from the chat response)
+curl -X POST http://localhost:8000/chat/messages/2/feedback \
+     -H "Content-Type: application/json" -d '{"rating": 1}'
+
+# Quiz + analytics
+curl -X POST http://localhost:8000/quiz -H "Content-Type: application/json" \
+     -d '{"grade": "9", "num_questions": 5}'
+curl http://localhost:8000/admin/analytics
 ```
+
+### 3.5 Run the web app (React frontend)
+
+Requires Node.js 18+ (`node --version`). In a second terminal:
+
+```bash
+cd ~/Projects/ai/personal/educator/frontend
+npm install        # first time only
+npm run dev        # → http://localhost:5173
+```
+
+Open **http://localhost:5173** — three tabs:
+
+- **Chat** — streaming answers with memory, source chips, 👍/👎 feedback. Set the grade before the first message (filters are fixed per conversation; use “+ New chat” to change them).
+- **Quiz** — generate multiple-choice quizzes from the ingested books and answer them interactively.
+- **Admin** — upload books (with live ingestion status), delete them, and see analytics.
+
+The dev server proxies `/api/*` to the backend on port 8000, so both must be running. Note: `frontend/.npmrc` pins the public npm registry so a corporate registry in `~/.npmrc` doesn't interfere.
 
 ---
 

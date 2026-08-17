@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     # Retrieval
     top_k: int = 6
 
+    # Chat (Phase 2)
+    history_turns: int = 8  # prior messages included in the prompt
+    condense_followups: bool = True  # rewrite follow-ups into standalone search queries
+    quiz_questions: int = 5
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
