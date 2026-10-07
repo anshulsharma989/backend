@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     embedding_provider: str = "sentence_transformers"  # or "ollama"
     embedding_model: str = "BAAI/bge-m3"
     embedding_dim: int = 1024
+    # Skip the Hugging Face Hub freshness check (HEAD requests on every load) and
+    # read straight from the local cache. Leave False until the model has been
+    # downloaded at least once.
+    hf_hub_offline: bool = False
 
     # LLM
     llm_provider: str = "ollama"  # or "claude"
