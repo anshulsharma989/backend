@@ -44,7 +44,27 @@ class Settings(BaseSettings):
     condense_followups: bool = True  # rewrite follow-ups into standalone search queries
     quiz_questions: int = 5
 
+    # Auth (M4)
+    jwt_secret_key: str = "change-me-in-prod"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 60 * 24 * 7  # 7 days — local-first, low friction
+    cors_origins: str = "http://localhost:5173"
+
+    # Dev seed accounts — read only by `python -m app.cli seed`. Leave blank
+    # to skip; use `create-admin` and real signups instead.
+    seed_admin_email: str = ""
+    seed_admin_password: str = ""
+    seed_admin_name: str = "Admin"
+    seed_student_email: str = ""
+    seed_student_password: str = ""
+    seed_student_name: str = "Student"
+    seed_student_grade: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
 @lru_cache

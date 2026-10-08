@@ -8,6 +8,7 @@ pydantic-settings>=2.4
 sqlalchemy>=2.0
 psycopg[binary]>=3.2
 pgvector>=0.3
+alembic>=1.13
 
 # Document parsing
 pymupdf>=1.24
@@ -28,3 +29,9 @@ anthropic>=0.40        # Claude provider (future switch)
 # CLI
 typer>=0.12
 rich>=13.0
+
+# Auth
+python-jose[cryptography]>=3.3
+passlib[bcrypt]>=1.7.4
+bcrypt<4.1              # passlib 1.7.4 is incompatible with bcrypt>=4.1
+email-validator>=2.0    # enables pydantic EmailStr

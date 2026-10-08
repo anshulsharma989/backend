@@ -58,7 +58,7 @@ Verify it's healthy:
 docker compose ps        # db should show "healthy"
 ```
 
-Tables, the pgvector extension, and the vector index are created automatically the first time the app runs — no manual SQL needed.
+Tables, the pgvector extension, and the vector index are owned by Alembic migrations (`migrations/versions/`) and applied automatically the first time the app or CLI runs — no manual SQL needed. You can also apply them explicitly: `alembic upgrade head`.
 
 ### 2.4 Start Ollama and pull the LLM
 
@@ -84,9 +84,17 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-This installs FastAPI, SQLAlchemy, pgvector, PyMuPDF, sentence-transformers (pulls in PyTorch — the largest install), and the rest. Takes a few minutes the first time.
+This installs FastAPI, SQLAlchemy, pgvector, Alembic, PyMuPDF, sentence-transformers (pulls in PyTorch — the largest install), and the rest. Takes a few minutes the first time.
 
 > **Note:** the first time you ingest a document, the `bge-m3` embedding model (~2 GB) downloads automatically from Hugging Face and is cached for all future runs.
+
+### 2.6 Apply migrations and seed initial data
+
+```bash
+python -m app.cli seed
+```
+
+This applies any pending Alembic migrations (schema structure) and then seeds `Grade 6`–`Grade 12` with a default subject list (`Mathematics`, `Science`, `English`, `Hindi`, `Social Science`) — safe to re-run any time, existing rows are left alone. It does **not** create an admin or student account unless `SEED_ADMIN_EMAIL`/`SEED_ADMIN_PASSWORD` and/or `SEED_STUDENT_EMAIL`/`SEED_STUDENT_PASSWORD` are set in `.env` (see §6) — for a real admin account, use the interactive `python -m app.cli create-admin` instead (§3.4); real students should sign up and get approved normally.
 
 ---
 
@@ -144,40 +152,55 @@ uvicorn app.main:app --reload
 - Interactive API docs (Swagger UI): **http://localhost:8000/docs**
 - Health check: `curl http://localhost:8000/health`
 
-Upload and ask over HTTP:
+Bootstrap an admin, then log in — every route below except `/health`, `/grades`, `/auth/signup`, and `/auth/login` requires the resulting Bearer token:
 
 ```bash
+python -m app.cli create-admin   # prompts for email/password/full name
+
+TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{"email": "admin@example.com", "password": "..."}' | jq -r .access_token)
+
+# Create a grade/subject (or use the ones `ingest` auto-created from the CLI)
+curl -s -X POST http://localhost:8000/admin/grades -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" -d '{"name": "Grade 9"}'
+curl -s http://localhost:8000/grades   # find the grade_id
+
 # Upload (ingestion runs in the background)
-curl -F file=@physics9.pdf -F title="Physics Part 1" -F subject=Physics -F grade=9 \
+curl -F file=@physics9.pdf -F title="Physics Part 1" -F grade_id=1 -F subject_id=1 \
+     -H "Authorization: Bearer $TOKEN" \
      http://localhost:8000/admin/documents
 
 # Poll status until "ready"  (queued → processing → ready | failed)
-curl http://localhost:8000/admin/documents/1
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/admin/documents/1
 
-# Ask
+# Ask (grade_id here is honored because the caller is an admin; a logged-in
+# student's grade is always taken from their own account instead)
 curl -X POST http://localhost:8000/ask \
-     -H "Content-Type: application/json" \
-     -d '{"question": "What is Newton'\''s first law?", "grade": "9"}'
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"question": "What is Newton'\''s first law?", "grade_id": 1}'
 
 # Chat with memory (reuse the returned conversation_id for follow-ups)
 curl -X POST http://localhost:8000/chat/ask \
-     -H "Content-Type: application/json" \
-     -d '{"question": "What is inertia?", "grade": "9"}'
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"question": "What is inertia?", "grade_id": 1}'
 
 # Streaming chat (SSE events: start → token… → done)
 curl -N -X POST http://localhost:8000/chat/ask/stream \
-     -H "Content-Type: application/json" \
-     -d '{"question": "What is inertia?", "grade": "9"}'
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"question": "What is inertia?", "grade_id": 1}'
 
 # Rate an answer (message_id from the chat response)
 curl -X POST http://localhost:8000/chat/messages/2/feedback \
-     -H "Content-Type: application/json" -d '{"rating": 1}'
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"rating": 1}'
 
 # Quiz + analytics
-curl -X POST http://localhost:8000/quiz -H "Content-Type: application/json" \
-     -d '{"grade": "9", "num_questions": 5}'
-curl http://localhost:8000/admin/analytics
+curl -X POST http://localhost:8000/quiz -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" -d '{"grade_id": 1, "num_questions": 5}'
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/admin/analytics
 ```
+
+A student signs up via `POST /auth/signup` (`{email, password, full_name, grade_id}`), lands in `pending` status, and can't log in until you approve them: `GET /admin/users/pending` then `POST /admin/users/{id}/approve` (both admin-only, same Bearer token as above).
 
 ### 3.5 Run the web app (React frontend)
 
@@ -189,11 +212,16 @@ npm install        # first time only
 npm run dev        # → http://localhost:5173
 ```
 
-Open **http://localhost:5173** — three tabs:
+Open **http://localhost:5173**. You'll land on a login/signup screen first:
 
-- **Chat** — streaming answers with memory, source chips, 👍/👎 feedback. Set the grade before the first message (filters are fixed per conversation; use “+ New chat” to change them).
+- **Sign up** as a student (pick your grade) — the account is created as `pending` and can't log in yet.
+- **Log in** as the admin you bootstrapped with `create-admin`, open the **Admin** tab's "Pending users" panel, and approve the new student.
+- Log back in as the approved student to see the **Chat** and **Quiz** tabs (no Admin tab — that's role-gated).
+
+Tabs, once logged in:
+- **Chat** — streaming answers with memory, source chips, 👍/👎 feedback. Grade is fixed to your account (shown read-only); pick an optional subject filter before the first message (filters are fixed per conversation; use "+ New chat" to change them).
 - **Quiz** — generate multiple-choice quizzes from the ingested books and answer them interactively.
-- **Admin** — upload books (with live ingestion status), delete them, and see analytics.
+- **Admin** (admin accounts only) — upload books (grade/subject pickers, live ingestion status), manage the grades/subjects catalog, approve/reject pending signups, and see analytics.
 
 The dev server proxies `/api/*` to the backend on port 8000, so both must be running. Note: `frontend/.npmrc` pins the public npm registry so a corporate registry in `~/.npmrc` doesn't interfere.
 
@@ -249,6 +277,13 @@ docker compose stop db
 | `CHUNK_SIZE_CHARS` / `CHUNK_OVERLAP_CHARS` | `3200` / `400` | tune if answers miss context |
 | `TOP_K` | `6` | chunks retrieved per question |
 | `UPLOAD_DIR` | `./data/uploads` | where uploaded files are stored |
+| `JWT_SECRET_KEY` | — | **required**; generate with `openssl rand -hex 32`. Rotating it invalidates all existing tokens |
+| `JWT_ALGORITHM` | `HS256` | |
+| `JWT_EXPIRE_MINUTES` | `10080` (7 days) | how long a login session lasts |
+| `CORS_ORIGINS` | `http://localhost:5173` | comma-separated list; add any other frontend origin you serve from |
+| `HF_HUB_OFFLINE` | `false` | set `true` after the embedding model is cached once, to skip Hugging Face Hub freshness checks on every startup |
+| `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` / `SEED_ADMIN_NAME` | — | optional; only read by `python -m app.cli seed`, to script-create an admin in a fresh environment. Leave unset and use `create-admin` interactively otherwise |
+| `SEED_STUDENT_EMAIL` / `SEED_STUDENT_PASSWORD` / `SEED_STUDENT_NAME` / `SEED_STUDENT_GRADE` | — | optional; only read by `python -m app.cli seed`, to script-create an already-*approved* student (bypasses signup+approval) for local testing |
 
 ### Switching to Claude
 
@@ -276,12 +311,21 @@ curl -s http://localhost:11434/api/tags | head -c 200   # lists pulled models
 # 3. API is up
 curl http://localhost:8000/health                   # {"status":"ok"}
 
-# 4. End-to-end: ingest any small PDF, then ask something from it
-python -m app.cli ingest sample.pdf --title Sample --grade 9
-python -m app.cli ask "…a question the PDF answers…" --grade 9
+# 4. Migrations applied + grades/subjects seeded
+python -m app.cli seed                              # "Grades created: 7, subjects created: 35" on first run
+curl -s http://localhost:8000/grades                # should list Grade 6..Grade 12
+
+# 5. End-to-end: ingest any small PDF, then ask something from it
+python -m app.cli ingest sample.pdf --title Sample --grade "Grade 9"
+python -m app.cli ask "…a question the PDF answers…" --grade "Grade 9"
+
+# 6. Auth: bootstrap an admin and confirm login works
+python -m app.cli create-admin
+curl -s -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" \
+     -d '{"email": "...", "password": "..."}'   # should return an access_token
 ```
 
-If the answer cites the right page, the whole pipeline works.
+If the answer cites the right page and login returns a token, the whole pipeline works.
 
 ---
 
@@ -296,9 +340,14 @@ If the answer cites the right page, the whole pipeline works.
 | Answers are slow (>60 s) on CPU | Use `qwen2.5:3b`, or run Ollama natively instead of in Docker (macOS). |
 | Scanned PDF ingests but finds no text | Install Tesseract + language packs (`brew install tesseract tesseract-lang`), then delete and re-ingest the document. |
 | `Unsupported file type` on upload | Only pdf/csv/docx/txt/md for now. Convert, or add a parser (see README §7 extensibility points). |
-| Answer says "couldn't find this in your books" | Check the document status is `ready` (`python -m app.cli docs`) and the `--grade` filter matches the grade the document was ingested with. |
-| Changed `EMBEDDING_MODEL` and search broke | Query and document vectors must come from the same model. Update `EMBEDDING_DIM`, drop the DB volume (`docker compose down -v && docker compose up -d db`), and re-ingest. |
+| Answer says "couldn't find this in your books" | Check the document status is `ready` (`python -m app.cli docs`) and the grade matches the grade the document was ingested with. |
+| Changed `EMBEDDING_MODEL` and search broke | Query and document vectors must come from the same model. Update `EMBEDDING_DIM`, drop the DB volume (`docker compose down -v && docker compose up -d db`), let migrations re-apply on next startup (or run `alembic upgrade head`), re-seed (`python -m app.cli seed`), and re-ingest. |
+| `alembic.util.exc.CommandError` / migration fails to apply | Check `docker compose ps` shows `db: healthy` first — migrations need a live DB connection. If a migration was half-applied, inspect `alembic_version` in Postgres and the specific error; as a last resort in local dev, reset the volume (`docker compose down -v && docker compose up -d db`) and let it reapply from scratch. |
 | Document status is `failed` | `python -m app.cli docs` or `GET /admin/documents/{id}` — the `error` field has the reason. |
+| `401 Not authenticated` on any API call | Missing/expired `Authorization: Bearer <token>` header — log in again via `POST /auth/login`. |
+| `403 Your account is awaiting admin approval` | Expected for a freshly signed-up student — have an admin run `POST /admin/users/{id}/approve`. |
+| Can't log in / no admin exists yet | Run `python -m app.cli create-admin` to bootstrap the first account — signup alone never creates an approved user. |
+| Switched a signed-up student's email/password and can't log in | There's no password-reset flow yet; have an admin delete and re-signup the account, or update `password_hash` directly for now. |
 
 ---
 
@@ -307,6 +356,9 @@ If the answer cites the right page, the whole pipeline works.
 | Path (inside `backend/`) | What |
 |---|---|
 | `app/` | All application code (see README §7 for the map) |
+| `migrations/versions/` | Alembic migrations — the source of truth for table structure |
+| `alembic.ini` | Alembic config; DB URL is overridden at runtime from `.env`, not hardcoded here |
+| `app/seed.py` | Idempotent seed data (grades/subjects/dev admin) — run via `python -m app.cli seed` |
 | `.env` | Your local configuration (created from `.env.example`) |
 | `.venv/` | Python virtual environment |
 | `data/uploads/` | Files uploaded via the API (venv runs) |

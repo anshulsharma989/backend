@@ -1,8 +1,12 @@
-"""Command-line interface for the walking skeleton.
+"""Command-line interface for the educator app.
 
+    python -m app.cli create-admin --email admin@school.test --full-name "Admin"
     python -m app.cli ingest path/to/book.pdf --title "Physics Part 1" --grade 9
     python -m app.cli ask "What is Newton's first law?" --grade 9
     python -m app.cli docs
+
+Grades/subjects are still given as plain names here for CLI ergonomics;
+`ingest` creates them if missing, `ask`/`chat`/`quiz` only look them up.
 """
 
 from pathlib import Path
@@ -10,17 +14,103 @@ from pathlib import Path
 import typer
 from rich.console import Console
 from rich.table import Table
+from sqlalchemy.orm import Session
 
 app = typer.Typer(help="Educator CLI — ingest books and ask questions.")
 console = Console()
+
+
+def _get_or_create_grade(db: Session, name: str):
+    from app.models import Grade
+
+    grade = db.query(Grade).filter(Grade.name == name).first()
+    if grade is None:
+        grade = Grade(name=name)
+        db.add(grade)
+        db.commit()
+    return grade
+
+
+def _get_or_create_subject(db: Session, grade_id: int, name: str):
+    from app.models import Subject
+
+    subject = (
+        db.query(Subject).filter(Subject.grade_id == grade_id, Subject.name == name).first()
+    )
+    if subject is None:
+        subject = Subject(grade_id=grade_id, name=name)
+        db.add(subject)
+        db.commit()
+    return subject
+
+
+def _find_grade(db: Session, name: str):
+    from app.models import Grade
+
+    grade = db.query(Grade).filter(Grade.name == name).first()
+    if grade is None:
+        console.print(f"[red]Unknown grade '{name}'.[/red] Run `docs` to see existing grades.")
+        raise typer.Exit(1)
+    return grade
+
+
+def _find_subject(db: Session, grade_id: int, name: str):
+    from app.models import Subject
+
+    subject = (
+        db.query(Subject).filter(Subject.grade_id == grade_id, Subject.name == name).first()
+    )
+    if subject is None:
+        console.print(f"[red]Unknown subject '{name}' for that grade.[/red]")
+        raise typer.Exit(1)
+    return subject
+
+
+@app.command()
+def seed() -> None:
+    """Seed initial data: grades, subjects, and an admin (if SEED_ADMIN_* env vars are set)."""
+    from app.db import get_session_factory, init_db
+    from app.seed import run_seed
+
+    init_db()
+    db = get_session_factory()()
+    run_seed(db)
+
+
+@app.command("create-admin")
+def create_admin(
+    email: str = typer.Option(..., prompt=True),
+    password: str = typer.Option(..., prompt=True, hide_input=True, confirmation_prompt=True),
+    full_name: str = typer.Option(..., prompt=True),
+) -> None:
+    """Bootstrap the first admin account (bypasses signup + approval)."""
+    from app.core.security import hash_password
+    from app.db import get_session_factory, init_db
+    from app.models import User, UserRole, UserStatus
+
+    init_db()
+    db = get_session_factory()()
+    if db.query(User).filter(User.email == email.lower()).first():
+        console.print("[red]A user with that email already exists.[/red]")
+        raise typer.Exit(1)
+    user = User(
+        email=email.lower(),
+        full_name=full_name,
+        password_hash=hash_password(password),
+        role=UserRole.admin,
+        status=UserStatus.approved,
+    )
+    db.add(user)
+    db.commit()
+    console.print(f"[green]Admin created:[/green] {email} (id={user.id})")
 
 
 @app.command()
 def ingest(
     file: Path = typer.Argument(..., exists=True, readable=True, help="Path to the document"),
     title: str = typer.Option(None, help="Document title (defaults to the file name)"),
-    subject: str = typer.Option(None, help="Subject, e.g. Physics"),
-    grade: str = typer.Option(None, help="Grade/class, e.g. 9"),
+    grade: str = typer.Option(..., help="Grade/class, e.g. 9 (created if it doesn't exist)"),
+    subject: str = typer.Option(None, help="Subject, e.g. Physics (created if it doesn't exist)"),
     language: str = typer.Option("en", help="en | hi | mixed"),
 ) -> None:
     """Parse, chunk, embed, and store a document."""
@@ -30,10 +120,13 @@ def ingest(
 
     init_db()
     db = get_session_factory()()
+    grade_row = _get_or_create_grade(db, grade)
+    subject_row = _get_or_create_subject(db, grade_row.id, subject) if subject else None
+
     document = Document(
         title=title or file.stem,
-        subject=subject,
-        grade=grade,
+        grade_id=grade_row.id,
+        subject_id=subject_row.id if subject_row else None,
         language=language,
         file_path=str(file.resolve()),
         file_type=file.suffix.lower().lstrip("."),
@@ -59,8 +152,10 @@ def ask(
     from app.services.qa import answer_question
 
     db = get_session_factory()()
+    grade_id = _find_grade(db, grade).id if grade else None
+    subject_id = _find_subject(db, grade_id, subject).id if subject else None
     with console.status("Thinking…"):
-        result = answer_question(db, question, grade=grade, subject=subject)
+        result = answer_question(db, question, grade_id=grade_id, subject_id=subject_id)
 
     console.print(f"\n[bold]Answer:[/bold]\n{result.answer}\n")
     if result.sources:
@@ -92,7 +187,7 @@ def docs() -> None:
         table.add_column(column)
     for doc in db.query(Document).order_by(Document.id).all():
         table.add_row(
-            str(doc.id), doc.title, doc.subject or "-", doc.grade or "-",
+            str(doc.id), doc.title, doc.subject.name if doc.subject else "-", doc.grade.name,
             doc.language, doc.file_type, doc.status.value,
         )
     console.print(table)
@@ -109,10 +204,25 @@ def chat(
     Type 'exit' or press Ctrl+C to quit.
     """
     from app.db import get_session_factory, init_db
+    from app.models import User, UserRole, UserStatus
     from app.services import chat as chat_service
 
     init_db()
     db = get_session_factory()()
+    grade_id = _find_grade(db, grade).id if grade else None
+    subject_id = _find_subject(db, grade_id, subject).id if subject else None
+
+    # CLI chat has no logged-in user; use (or create) a local system account to
+    # own the conversation rows.
+    cli_user = db.query(User).filter(User.email == "cli@local").first()
+    if cli_user is None:
+        cli_user = User(
+            email="cli@local", full_name="CLI", password_hash="",
+            role=UserRole.admin, status=UserStatus.approved,
+        )
+        db.add(cli_user)
+        db.commit()
+
     conversation_id: int | None = None
     console.print("[dim]Chat started — ask away (type 'exit' to quit).[/dim]")
 
@@ -127,7 +237,8 @@ def chat(
         console.print("[bold green]Tutor:[/bold green] ", end="")
         sources = []
         for event in chat_service.ask_stream(
-            db, question, conversation_id=conversation_id, grade=grade, subject=subject
+            db, question, cli_user.id, conversation_id=conversation_id,
+            grade_id=grade_id, subject_id=subject_id,
         ):
             if event["type"] == "start":
                 conversation_id = event["conversation_id"]
@@ -159,8 +270,12 @@ def quiz(
 
     init_db()
     db = get_session_factory()()
+    grade_id = _find_grade(db, grade).id if grade else None
+    subject_id = _find_subject(db, grade_id, subject).id if subject else None
     with console.status("Writing quiz…"):
-        result = generate_quiz(db, grade=grade, subject=subject, num_questions=num_questions)
+        result = generate_quiz(
+            db, grade_id=grade_id, subject_id=subject_id, num_questions=num_questions
+        )
 
     if result.get("questions") is None:
         console.print(f"[red]Quiz failed:[/red] {result.get('error')}")

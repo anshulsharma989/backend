@@ -28,8 +28,8 @@ language as the passages.\
 
 def _sample_chunks(
     db: Session,
-    grade: str | None,
-    subject: str | None,
+    grade_id: int | None,
+    subject_id: int | None,
     document_id: int | None,
     limit: int,
 ) -> list[Chunk]:
@@ -38,10 +38,10 @@ def _sample_chunks(
         .join(Document, Chunk.document_id == Document.id)
         .where(Document.status == DocumentStatus.ready)
     )
-    if grade:
-        stmt = stmt.where(Document.grade == grade)
-    if subject:
-        stmt = stmt.where(Document.subject == subject)
+    if grade_id is not None:
+        stmt = stmt.where(Document.grade_id == grade_id)
+    if subject_id is not None:
+        stmt = stmt.where(Document.subject_id == subject_id)
     if document_id:
         stmt = stmt.where(Document.id == document_id)
     stmt = stmt.order_by(func.random()).limit(limit)
@@ -62,13 +62,13 @@ def _extract_json_array(text: str) -> list | None:
 
 def generate_quiz(
     db: Session,
-    grade: str | None = None,
-    subject: str | None = None,
+    grade_id: int | None = None,
+    subject_id: int | None = None,
     document_id: int | None = None,
     num_questions: int | None = None,
 ) -> dict:
     num_questions = num_questions or get_settings().quiz_questions
-    chunks = _sample_chunks(db, grade, subject, document_id, limit=num_questions * 2)
+    chunks = _sample_chunks(db, grade_id, subject_id, document_id, limit=num_questions * 2)
     if not chunks:
         return {"questions": None, "error": "No ready documents match the given filters"}
 

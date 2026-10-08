@@ -1,6 +1,12 @@
-"""Database engine, session factory, and schema initialization."""
+"""Database engine, session factory, and schema initialization.
 
-from sqlalchemy import create_engine, text
+Schema is owned by Alembic migrations (migrations/versions/) — init_db()
+just applies any pending ones, it doesn't derive the schema from the models.
+"""
+
+from pathlib import Path
+
+from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import get_settings
@@ -38,20 +44,10 @@ def get_db():
 
 
 def init_db() -> None:
-    """Create the pgvector extension, tables, and vector index."""
-    # Import models so they are registered on Base.metadata
-    from app import models  # noqa: F401
+    """Apply any pending Alembic migrations."""
+    from alembic import command
+    from alembic.config import Config
 
-    engine = get_engine()
-    with engine.connect() as conn:
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        conn.commit()
-    Base.metadata.create_all(engine)
-    with engine.connect() as conn:
-        conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS chunks_embedding_idx "
-                "ON chunks USING hnsw (embedding vector_cosine_ops)"
-            )
-        )
-        conn.commit()
+    backend_dir = Path(__file__).resolve().parent.parent
+    cfg = Config(str(backend_dir / "alembic.ini"))
+    command.upgrade(cfg, "head")

@@ -62,7 +62,7 @@ This is a **RAG (Retrieval-Augmented Generation)** application. Instead of fine-
   - Answers with **source citations** (book, chapter, page)
   - Chat history per student
   - "I don't know" behavior — if the answer isn't in the books, the app says so instead of hallucinating
-- **Auth & roles** — Admin, Student (each student has a grade; Teacher role reserved for later)
+- **Auth & roles** — Admin, Student (each student has a grade; Teacher role reserved for later). Students self-signup and pick their grade, but the account stays `pending` until an admin approves it — no one reaches the app without an admin in the loop.
 
 ### Phase 2 (Enhancements) — implemented ✅ (backend + CLI; UI in M3)
 - ✅ Streaming answers (token-by-token over SSE: `POST /chat/ask/stream`)
@@ -186,54 +186,62 @@ This is the part you asked for help with. Per uploaded file:
 
 ---
 
-## 5. Data Model (simplified)
+## 5. Data Model (as implemented)
 
 ```
-users          (id, name, email, password_hash, role [admin|student],
-                grade,                          -- students: drives access control
-                created_at)
-grades         (id, name)                       -- e.g. "Class 6" ... "Class 12"
+grades         (id, name)                       -- e.g. "Grade 9"
 subjects       (id, grade_id, name)
-documents      (id, subject_id, title, file_path, file_type,
-                language [en|hi|mixed], is_scanned,
-                status [queued|processing|ready|failed], uploaded_by, created_at)
+users          (id, email, password_hash, full_name,
+                role [admin|student], status [pending|approved|rejected],
+                grade_id,                       -- null for admins; drives access control for students
+                created_at)
+documents      (id, title, grade_id, subject_id, file_path, file_type,
+                language [en|hi|mixed],
+                status [queued|processing|ready|failed], error, created_at)
 chunks         (id, document_id, content, embedding vector(1024),  -- bge-m3
-                chapter, page_number, chunk_index, language)
-conversations  (id, user_id, subject_id, title, created_at)
+                page_number, chunk_index)
+conversations  (id, user_id, grade_id, subject_id, title, created_at)
 messages       (id, conversation_id, role [user|assistant], content,
-                sources jsonb, created_at)
-feedback       (id, message_id, rating, comment)        -- Phase 2
+                sources jsonb, rating, feedback_comment, created_at)
 ```
 
-Access control rule: every retrieval query joins `chunks → documents → subjects → grades` and filters by the requesting student's grade. Admins see everything.
+Access control rule: every retrieval query filters `documents` by `grade_id`/`subject_id` directly (FK equality, not a join chain). A student's `grade_id` is always read from their own `users` row server-side — a client can never override it, even by tampering with the request body. Admins bypass the grade filter entirely. New students land in `status=pending` and can't log in until an admin approves them (`POST /admin/users/{id}/approve`).
 
 ---
 
 ## 6. API Sketch
 
 ```
-POST   /auth/register            POST   /auth/login
+# Auth (public)
+POST   /auth/signup              # {email, password, full_name, grade_id} → status=pending, no token yet
+POST   /auth/login                # {email, password} → {access_token, token_type, user}
+                                   # 403 while status is pending/rejected
+GET    /auth/me                   # current user (Bearer token)
 
-# Admin
-POST   /admin/documents          # multipart upload (grade, subject, language) → doc_id, status=queued
-GET    /admin/documents          # list with ingestion status
-DELETE /admin/documents/{id}     # removes doc + its chunks
-GET    /admin/documents/{id}/status
-POST   /admin/grades             # manage grades & subjects
-POST   /admin/subjects
+GET    /grades                    # public — needed by the signup form before login exists
 
-# Student (all responses scoped to the student's grade automatically)
-POST   /chat/ask                 # {question, conversation_id?, grade?, subject?}
-                                 # → {conversation_id, message_id, answer, sources[]}
-POST   /chat/ask/stream          # same body; SSE stream: start → token* → done
-GET    /chat/conversations
-GET    /chat/conversations/{id}/messages
-POST   /chat/messages/{id}/feedback   # {rating: 1 | -1, comment?}
-POST   /quiz                     # {grade?, subject?, document_id?, num_questions?}
-POST   /ask                      # one-shot Q&A without conversation memory
+# Admin (Bearer token, role=admin)
+GET    /admin/users/pending       # signups awaiting review
+POST   /admin/users/{id}/approve
+POST   /admin/users/{id}/reject
+POST   /admin/grades              DELETE /admin/grades/{id}
+POST   /admin/subjects            DELETE /admin/subjects/{id}
+POST   /admin/documents           # multipart upload (grade_id, subject_id, language) → doc_id, status=queued
+GET    /admin/documents           # list with ingestion status
+GET    /admin/documents/{id}
+DELETE /admin/documents/{id}      # removes doc + its chunks
+GET    /admin/analytics           # question count, feedback tallies, recent questions
 
-GET    /subjects                 # subjects/books for the student's grade only
-GET    /admin/analytics          # question count, feedback tallies, recent questions
+# Student (Bearer token; grade_id is always the caller's own — admins may override)
+GET    /subjects?grade_id=        # subjects for the caller's grade (students ignore the query param)
+POST   /chat/ask                  # {question, conversation_id?, subject_id?}
+                                   # → {conversation_id, message_id, answer, sources[]}
+POST   /chat/ask/stream           # same body; SSE stream: start → token* → done
+GET    /chat/conversations        # the caller's own conversations (admins see all)
+GET    /chat/conversations/{id}/messages   # 404 if not the owner (and not admin)
+POST   /chat/messages/{id}/feedback        # {rating: 1 | -1, comment?}
+POST   /quiz                      # {subject_id?, document_id?, num_questions?}
+POST   /ask                       # one-shot Q&A without conversation memory
 ```
 
 ---
@@ -246,10 +254,17 @@ educator/
 │   ├── app/
 │   │   ├── main.py             # FastAPI app
 │   │   ├── cli.py              # terminal: ingest / ask / docs
-│   │   ├── core/config.py      # all settings via env vars
-│   │   ├── db.py               # engine, sessions, pgvector init
-│   │   ├── models/             # SQLAlchemy models (Document, Chunk)
-│   │   ├── api/routes.py       # /ask, /admin/documents, /health
+│   │   ├── core/
+│   │   │   ├── config.py       # all settings via env vars
+│   │   │   └── security.py     # password hashing + JWT
+│   │   ├── db.py               # engine, sessions; init_db() applies Alembic migrations
+│   │   ├── seed.py             # idempotent seed data: grades, subjects, dev admin
+│   │   ├── models/             # SQLAlchemy models (User, Grade, Subject, Document, Chunk, ...)
+│   │   ├── api/
+│   │   │   ├── deps.py         # get_current_user / require_admin / resolve_scope
+│   │   │   ├── auth.py         # /auth/*, /admin/users/*
+│   │   │   ├── catalog.py      # /grades, /subjects, /admin/grades, /admin/subjects
+│   │   │   └── routes.py       # /ask, /chat/*, /admin/documents, /quiz, /health
 │   │   └── services/
 │   │       ├── ingestion/
 │   │       │   ├── parsers/    # pdf (+OCR), csv, docx, txt/md — registry-based
@@ -259,13 +274,16 @@ educator/
 │   │       ├── llm/            # provider interface: ollama | claude
 │   │       ├── retrieval.py    # pgvector search (grade filter enforced here)
 │   │       └── qa.py           # RAG orchestration + citations
+│   ├── migrations/              # Alembic — schema structure lives here, not in code
+│   │   └── versions/           # one file per schema change; env.py reads DATABASE_URL from .env
+│   ├── alembic.ini
 │   ├── docker-compose.yml      # postgres + ollama + api
 │   ├── .env.example            # copy to .env
 │   ├── requirements.txt
 │   ├── Dockerfile
 │   ├── README.md / SETUP.md
 │   └── data/uploads/           # uploaded files
-└── frontend/                   # React app (M3) — will sit alongside backend/
+└── frontend/                   # React app — login/signup, chat, quiz, admin dashboard
 ```
 
 **Extensibility points** (each is an interface + a factory switch, no other code changes):
@@ -302,12 +320,23 @@ pip install -r requirements.txt
 # 4. (Optional, for scanned PDFs) OCR support
 brew install tesseract tesseract-lang
 
-# 5. Ingest a book and ask a question — the first run downloads the
-#    bge-m3 embedding model (~2 GB, one time)
-python -m app.cli ingest ~/books/physics9.pdf --title "Physics Part 1" --subject Physics --grade 9
-python -m app.cli ask "What is Newton's first law?" --grade 9
+# 5. Apply the schema (Alembic migrations — see migrations/) and seed initial
+#    grades/subjects. This also runs automatically on first API/CLI use via
+#    init_db(), but running it explicitly makes the first-time state obvious.
+python -m app.cli seed
 
-# 6. Or run the API
+# 6. Ingest a book and ask a question — the first run downloads the
+#    bge-m3 embedding model (~2 GB, one time). `--grade`/`--subject` are
+#    plain names; use the seeded "Grade 9" etc. so you don't create a duplicate.
+python -m app.cli ingest ~/books/physics9.pdf --title "Physics Part 1" --subject Science --grade "Grade 9"
+python -m app.cli ask "What is Newton's first law?" --grade "Grade 9"
+
+# 7. Bootstrap the first admin account (needed before anyone can use the
+#    API/web app — students who sign up stay pending until this admin
+#    approves them)
+python -m app.cli create-admin
+
+# 8. Or run the API
 uvicorn app.main:app --reload    # then open http://localhost:8000/docs
 ```
 
@@ -322,16 +351,26 @@ docker compose exec ollama ollama pull qwen2.5:7b
 
 ### API quick reference
 
-```bash
-# Upload a book (ingestion runs in the background; poll status)
-curl -F file=@physics9.pdf -F title="Physics Part 1" -F subject=Physics -F grade=9 \
-     http://localhost:8000/admin/documents
-curl http://localhost:8000/admin/documents/1        # status: queued → processing → ready
+Every route except `/health`, `/grades`, `/auth/signup`, and `/auth/login` requires a Bearer token.
 
-# Ask a question
-curl -X POST http://localhost:8000/ask \
+```bash
+# Log in (after python -m app.cli create-admin) and grab the token
+TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
      -H "Content-Type: application/json" \
-     -d '{"question": "What is Newton'\''s first law?", "grade": "9"}'
+     -d '{"email": "admin@example.com", "password": "..."}' | jq -r .access_token)
+
+# Upload a book (ingestion runs in the background; poll status) — grade_id/subject_id,
+# not names; fetch ids from GET /grades or the admin "Grades & subjects" panel in the UI
+curl -F file=@physics9.pdf -F title="Physics Part 1" -F grade_id=1 -F subject_id=1 \
+     -H "Authorization: Bearer $TOKEN" \
+     http://localhost:8000/admin/documents
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/admin/documents/1   # queued → processing → ready
+
+# Ask a question (as a logged-in student, grade_id is derived from the account —
+# this example reuses the admin token, which can pass grade_id explicitly)
+curl -X POST http://localhost:8000/ask \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"question": "What is Newton'\''s first law?", "grade_id": 1}'
 ```
 
 ### Switching to Claude later
@@ -352,7 +391,7 @@ CLAUDE_MODEL=claude-opus-5     # configurable
 | **M1 — Walking skeleton** | Docker Compose; FastAPI + Postgres + Ollama wired; ingest a PDF → ask a question (CLI + API), get a grounded answer with citations | ✅ **Done** |
 | **M2 — Ingestion** | Upload API ✅, PDF/CSV/DOCX/TXT parsers ✅, OCR for scanned PDFs ✅, status tracking ✅ — remaining: move background ingestion to Celery + Redis for durability | 🟡 Mostly done |
 | **M3 — Student chat** | React chat UI (streaming, memory, sources, 👍/👎) + Quiz page + Admin page (upload/status/analytics) | ✅ **Done** |
-| **M4 — Auth & grades** | JWT auth, roles, grade-based access control tied to student accounts, admin dashboard for grades/subjects/documents | ⬜ |
+| **M4 — Auth & grades** | JWT auth, roles, hybrid signup (self-signup + admin approval), grade/subject tables replacing free-text fields, grade always server-derived for students, admin dashboard for pending users/grades/subjects/documents | ✅ **Done** |
 | **M5 — Polish** | Feedback ✅, quiz generation ✅, basic analytics ✅ — remaining: re-ranking, better chunking experiments | 🟡 Mostly done |
 | **M6 — Claude option** | Claude provider ✅ (already implemented — flip `LLM_PROVIDER=claude`) | ✅ Done early |
 | **M7 — Mobile & voice** | React Native app on the existing API; Whisper-based voice questions (EN + HI), optional spoken answers | ⬜ |
@@ -378,6 +417,7 @@ Everything runs on your local machine — no cloud needed for now:
 | Languages | **English + Hindi** — multilingual embeddings (`bge-m3`) and LLM (`qwen2.5`); answer in the language the student asked in |
 | Scanned books | **Supported in MVP** — OCR (Tesseract `eng+hin`) auto-applied to pages without extractable text |
 | Access control | **By grade** — enforced in the retrieval query on the backend, not just hidden in the UI |
+| Signup | **Hybrid** — students self-signup and pick a grade, but stay `pending` until an admin approves them; no open self-service onboarding |
 | Hosting | **Local machine** for now (sufficient RAM); Docker Compose makes the later move to a VM trivial |
 | Voice | **Future phase** — Whisper (local) for English/Hindi speech-to-text, reusing the same Q&A pipeline |
 

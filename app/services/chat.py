@@ -55,15 +55,18 @@ def _get_or_create_conversation(
     db: Session,
     conversation_id: int | None,
     question: str,
-    grade: str | None,
-    subject: str | None,
+    user_id: int,
+    grade_id: int | None,
+    subject_id: int | None,
 ) -> Conversation:
     if conversation_id is not None:
         conversation = db.get(Conversation, conversation_id)
         if conversation is None:
             raise ValueError(f"Conversation {conversation_id} not found")
         return conversation
-    conversation = Conversation(title=question[:120], grade=grade, subject=subject)
+    conversation = Conversation(
+        title=question[:120], user_id=user_id, grade_id=grade_id, subject_id=subject_id
+    )
     db.add(conversation)
     db.commit()
     return conversation
@@ -89,13 +92,16 @@ def _condense_question(question: str, history: list[Message]) -> str:
 def prepare_turn(
     db: Session,
     question: str,
+    user_id: int,
     conversation_id: int | None = None,
-    grade: str | None = None,
-    subject: str | None = None,
+    grade_id: int | None = None,
+    subject_id: int | None = None,
     document_id: int | None = None,
 ) -> ChatTurn:
     settings = get_settings()
-    conversation = _get_or_create_conversation(db, conversation_id, question, grade, subject)
+    conversation = _get_or_create_conversation(
+        db, conversation_id, question, user_id, grade_id, subject_id
+    )
     history = conversation.messages[-settings.history_turns :]
 
     search_text = question
@@ -106,8 +112,8 @@ def prepare_turn(
     chunks = search_chunks(
         db,
         query_embedding,
-        grade=conversation.grade or grade,
-        subject=conversation.subject or subject,
+        grade_id=conversation.grade_id,
+        subject_id=conversation.subject_id,
         document_id=document_id,
     )
 
@@ -161,13 +167,14 @@ def finalize_turn(db: Session, turn: ChatTurn, answer: str) -> Message:
 def ask(
     db: Session,
     question: str,
+    user_id: int,
     conversation_id: int | None = None,
-    grade: str | None = None,
-    subject: str | None = None,
+    grade_id: int | None = None,
+    subject_id: int | None = None,
     document_id: int | None = None,
 ) -> ChatResult:
     """Blocking one-call chat turn."""
-    turn = prepare_turn(db, question, conversation_id, grade, subject, document_id)
+    turn = prepare_turn(db, question, user_id, conversation_id, grade_id, subject_id, document_id)
     if not turn.has_context:
         answer = NO_CONTEXT_ANSWER
     else:
@@ -184,9 +191,10 @@ def ask(
 def ask_stream(
     db: Session,
     question: str,
+    user_id: int,
     conversation_id: int | None = None,
-    grade: str | None = None,
-    subject: str | None = None,
+    grade_id: int | None = None,
+    subject_id: int | None = None,
     document_id: int | None = None,
 ) -> Iterator[dict]:
     """Streaming chat turn. Yields event dicts:
@@ -195,7 +203,7 @@ def ask_stream(
     {"type": "token", "text": ...}          (repeatedly)
     {"type": "done", "message_id": ..., "sources": [...]}
     """
-    turn = prepare_turn(db, question, conversation_id, grade, subject, document_id)
+    turn = prepare_turn(db, question, user_id, conversation_id, grade_id, subject_id, document_id)
     yield {"type": "start", "conversation_id": turn.conversation.id}
 
     parts: list[str] = []

@@ -52,13 +52,13 @@ def _build_user_prompt(question: str, chunks: list[RetrievedChunk]) -> str:
 def answer_question(
     db: Session,
     question: str,
-    grade: str | None = None,
-    subject: str | None = None,
+    grade_id: int | None = None,
+    subject_id: int | None = None,
     document_id: int | None = None,
 ) -> AnswerResult:
     query_embedding = get_embedding_provider().embed_query(question)
     chunks = search_chunks(
-        db, query_embedding, grade=grade, subject=subject, document_id=document_id
+        db, query_embedding, grade_id=grade_id, subject_id=subject_id, document_id=document_id
     )
     if not chunks:
         return AnswerResult(answer=NO_CONTEXT_ANSWER)
